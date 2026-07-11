@@ -1,81 +1,73 @@
-# Slack Image Describer — build & deploy checklist
+# Image Describer
 
-This is deliberately the *smallest* version that still demos well: reply
-"describe" in a thread under an image, get an ephemeral (private) description
-back with follow-up buttons. No slash command, no share button, no OCR-mode
-switching — add those later only if time allows.
+A Slack agent that describes images for blind and low-vision users — built for the **Slack Agent Builder Challenge** (Slack Agent for Good track).
 
-## Part A — Slack app setup (~15 min)
+## The problem
 
-1. Go to https://api.slack.com/apps → **Create New App** → **From an app manifest**.
-2. Pick your workspace, paste in `manifest.yml` from this folder, click through to create.
-3. Go to **OAuth & Permissions** → **Install to Workspace** → approve.
-4. Copy the **Bot User OAuth Token** (starts `xoxb-`) → this is your `SLACK_BOT_TOKEN`.
-5. Go to **Basic Information** → **App Credentials** → copy the **Signing Secret** → this is your `SLACK_SIGNING_SECRET`.
-6. Invite the bot to a test channel: `/invite @Image Describer`.
+Slack conversations are full of images — screenshots, memes, diagrams, photos — but none of that content is accessible to blind or low-vision teammates using screen readers. A screen reader announces "image attached" and stops there. Image Describer closes that gap by turning any image in a thread into a clear, spoken-friendly description, on demand, without cluttering the channel for everyone else.
 
-Don't set the Event Subscriptions Request URL yet — you need a deployed URL first (Part C).
+## How it works
 
-## Part B — Get a Gemini API key (~2 min)
+1. Someone posts an image in a Slack channel.
+2. A user replies to that message in a thread with the word `describe`.
+3. The bot fetches the parent message, finds the image, and downloads it.
+4. It calls a `describe_image` tool exposed by a custom **MCP (Model Context Protocol) server**, which sends the image to **Gemini Vision** and gets back a structured description plus three tailored follow-up questions.
+5. The bot replies **ephemerally** (visible only to the person who asked) with:
+   - A plain-language description, written to be the first thing a screen reader announces
+   - Up to three follow-up buttons (e.g. "Is there any text in the image?", "What is the person's expression?") for more detail on demand
 
-1. Go to https://aistudio.google.com/app/apikey → create a key.
-2. That's your `GEMINI_API_KEY`.
-3. Double-check which model name is currently valid for your key at
-   https://ai.google.dev — model names change often, and `index.js` has a
-   `GEMINI_MODEL` constant at the top you may need to update.
+Clicking a follow-up button sends another private reply with that specific answer — so a user can drill into exactly the detail they need, without a wall of text up front.
 
-## Part C — Run it locally first (~10 min)
+## Architecture
 
 ```
-cd slack-image-describer
-npm install
-cp .env.example .env
-# fill in .env with your three secrets from Parts A and B
-npm start
+┌─────────────┐      "describe"       ┌──────────────────┐
+│   Slack      │ ───────────────────▶ │   index.js        │
+│  (channel/   │                       │  (Bolt app,        │
+│   thread)    │ ◀─────────────────── │   MCP client)       │
+└─────────────┘   ephemeral reply +    └─────────┬──────────┘
+                    follow-up buttons              │
+                                          MCP tool call
+                                       (stdio transport)
+                                                    │
+                                                    ▼
+                                          ┌──────────────────┐
+                                          │  mcp-server.mjs   │
+                                          │  (MCP server,      │
+                                          │  describe_image     │
+                                          │  tool)               │
+                                          └─────────┬──────────┘
+                                                    │
+                                              Gemini Vision API
+                                                    │
+                                                    ▼
+                                          Structured JSON:
+                                          { description, followups }
 ```
 
-You should see `⚡ Image Describer is running` on port 3000.
+- **`index.js`** — A Slack Bolt app. Listens for thread replies, handles Slack events and button interactions, and acts as an **MCP client**.
+- **`mcp-server.mjs`** — A standalone MCP server exposing one tool, `describe_image`. This is the genuine MCP server integration: `index.js` spawns it as a child process and communicates over the standard MCP stdio transport, rather than calling Gemini directly.
+- **Gemini Vision** (`gemini-flash-latest`) — Does the actual image understanding, prompted to return a short description plus three contextual follow-up Q&A pairs as JSON.
 
-To let Slack reach your local server before you deploy anywhere, use a tunnel:
+## Tech used
 
-```
-npx ngrok http 3000
-```
+- **MCP server integration** — the core required technology for this build. `mcp-server.mjs` is a real MCP server; `index.js` is a real MCP client connecting to it over stdio.
+- **Slack Bolt (Node.js)** for the Slack app itself (events, ephemeral messages, interactive buttons).
+- **Google Gemini Vision API** for image understanding.
 
-Copy the `https://xxxx.ngrok-free.app` URL it gives you.
+## Setup
 
-## Part D — Point Slack at your server
+See the full local-development and deployment checklist in this repo for step-by-step instructions on Slack app configuration, environment variables, running locally with a tunnel, and deploying to a persistent host.
 
-1. Back in your Slack app config → **Event Subscriptions** → toggle on →
-   Request URL = `https://<your-url>/slack/events` → it should show "Verified".
-2. **Interactivity & Shortcuts** → toggle on → same Request URL.
-3. Save changes, reinstall the app if prompted.
+## Known limitations (by design, given the timeline)
 
-## Part E — Test it
+- Handles one image per trigger, and only image files (not PDFs or other attachments).
+- Reply-only trigger (`describe` in a thread) — no slash command or message shortcut yet.
+- All responses are ephemeral — no "share with channel" option yet.
+- Follow-up answers are generated once per image, not a live back-and-forth conversation.
 
-1. Post any image in your test channel.
-2. Reply to that message (creating a thread) with the word `describe`.
-3. You should get a private (ephemeral) reply — only you can see it — with a
-   short description and up to 3 follow-up buttons.
-4. Click a follow-up button → you should get another private reply with that answer.
+Being upfront about scope: this was built end-to-end, including learning MCP for the first time, within the hackathon window. The above are the deliberate corners cut to ship something that works reliably over trying to do everything at once.
 
-## Part F — Deploy somewhere permanent (before recording your demo video)
+## Why this matters
 
-ngrok URLs expire/change, which will break your submission if a judge tests it
-after your session ends. Deploy to something persistent:
-
-- **Railway** (railway.app) or **Render** (render.com) are the fastest for a
-  Node app like this — connect your GitHub repo, add the three env vars in
-  their dashboard, deploy, then update the Event Subscriptions / Interactivity
-  Request URLs in Slack to the new permanent URL.
-
-## Known cut corners (be upfront about these in your submission)
-
-- Only handles one image per trigger, and only images (not PDFs/other files).
-- No slash command or message-shortcut trigger yet — reply-only.
-- No OCR-priority mode for screenshots vs. meme-tone mode — single prompt for now.
-- No "share with channel" option — everything is ephemeral.
-- Follow-up answers are static (generated once, not truly conversational).
-
-Being explicit about what's intentionally out of scope for a 2-day build reads
-much better to judges than pretending it's more finished than it is.
+Accessibility tooling is often bolted on as an afterthought. Image Describer is small on purpose — it does one thing (describe an image, on request, privately) well, inside the tool teams already use every day, rather than asking anyone to adopt a separate accessibility app.
